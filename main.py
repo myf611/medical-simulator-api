@@ -141,14 +141,16 @@ async def login(request: Request):
     if not UZ_PHONE_REGEX.match(phone):
         raise HTTPException(400, f"Неверный формат номера: {phone}")
 
+    print(f"LOGIN: searching phone={phone!r}")
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
             f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone}&is_active=eq.true",
             headers=supabase_headers()
         )
+        print(f"LOGIN: supabase response status={existing.status_code} body={existing.text[:200]}")
         students = existing.json()
         if not students:
-            raise HTTPException(404, "Номер не найден. Пройдите регистрацию.")
+            raise HTTPException(404, f"Номер не найден: {phone}")
 
         student = students[0]
         return {
