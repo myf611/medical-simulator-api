@@ -101,8 +101,10 @@ async def register(request: Request):
             raise HTTPException(403, f"Достигнут лимит студентов ({org['max_students']}). Обратитесь к администратору.")
 
         # Check if phone already registered
+        from urllib.parse import quote
+        phone_encoded = quote(phone, safe='')
         existing = await client.get(
-            f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone}",
+            f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone_encoded}",
             headers=supabase_headers()
         )
         if existing.json():
@@ -142,9 +144,11 @@ async def login(request: Request):
         raise HTTPException(400, f"Неверный формат номера: {phone}")
 
     print(f"LOGIN: searching phone={phone!r}")
+    from urllib.parse import quote
+    phone_encoded = quote(phone, safe='')
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
-            f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone}&is_active=eq.true",
+            f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone_encoded}&is_active=eq.true",
             headers=supabase_headers()
         )
         print(f"LOGIN: supabase response status={existing.status_code} body={existing.text[:200]}")
