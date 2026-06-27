@@ -61,7 +61,8 @@ async def register(request: Request):
     data = await request.json()
     last_name = data.get("last_name", "").strip()
     first_name = data.get("first_name", "").strip()
-    phone = data.get("phone", "").strip()
+    raw = data.get("phone", "").strip()
+    phone = '+' + raw.replace('+', '').replace(' ', '').replace('-', '')
     workplace = data.get("workplace", "").strip()
     region = data.get("region", "").strip()
     city = data.get("city", "").strip()
@@ -131,11 +132,14 @@ async def register(request: Request):
 @app.post("/api/login")
 async def login(request: Request):
     data = await request.json()
-    phone = data.get("phone", "").strip()
+    # Normalize phone - remove all spaces and non-digits except leading +
+    raw_phone = data.get("phone", "").strip()
+    # Remove spaces from phone number
+    phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
     org_slug = data.get("org_slug", "tashkent-endo")
 
     if not UZ_PHONE_REGEX.match(phone):
-        raise HTTPException(400, "Неверный формат номера")
+        raise HTTPException(400, f"Неверный формат номера: {phone}")
 
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
