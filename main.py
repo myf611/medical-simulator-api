@@ -126,6 +126,33 @@ async def register(request: Request):
         student = create_resp.json()[0]
         return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "existing": False}
 
+
+# ── LOGIN ────────────────────────────────────────────
+@app.post("/api/login")
+async def login(request: Request):
+    data = await request.json()
+    phone = data.get("phone", "").strip()
+    org_slug = data.get("org_slug", "tashkent-endo")
+
+    if not UZ_PHONE_REGEX.match(phone):
+        raise HTTPException(400, "Неверный формат номера")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        existing = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone}&is_active=eq.true",
+            headers=supabase_headers()
+        )
+        students = existing.json()
+        if not students:
+            raise HTTPException(404, "Номер не найден. Пройдите регистрацию.")
+
+        student = students[0]
+        return {
+            "student_id": student["id"],
+            "name": f"{student['last_name']} {student['first_name']}",
+            "existing": True
+        }
+
 # ── SAVE RESULT ─────────────────────────────────────
 @app.post("/api/attempt")
 async def save_attempt(request: Request):
