@@ -62,6 +62,7 @@ async def register(request: Request):
     last_name = data.get("last_name", "").strip()
     first_name = data.get("first_name", "").strip()
     phone = data.get("phone", "").strip()
+    workplace = data.get("workplace", "").strip()
     org_slug = data.get("org_slug", "tashkent-endo")
 
     # Validate fields
@@ -114,7 +115,8 @@ async def register(request: Request):
                 "organization_id": org["id"],
                 "last_name": last_name,
                 "first_name": first_name,
-                "phone": phone
+                "phone": phone,
+                "workplace": workplace
             }
         )
         student = create_resp.json()[0]
