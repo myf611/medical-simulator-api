@@ -163,6 +163,38 @@ async def login(request: Request):
             "existing": True
         }
 
+
+# ── LAB TESTS SEARCH ─────────────────────────────────
+@app.get("/api/lab-search")
+async def lab_search(q: str = "", limit: int = 8):
+    if len(q.strip()) < 2:
+        return []
+    from urllib.parse import quote
+    q_encoded = quote(q.strip(), safe='')
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Search by name
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/lab_tests?is_active=eq.true&name=ilike.*{q_encoded}*&limit={limit}&select=id,name,aliases,category&order=name",
+            headers=supabase_headers()
+        )
+        results = resp.json() if resp.status_code == 200 else []
+
+        # Also search aliases if not enough results
+        if len(results) < limit:
+            resp2 = await client.get(
+                f"{SUPABASE_URL}/rest/v1/lab_tests?is_active=eq.true&aliases=ilike.*{q_encoded}*&limit={limit}&select=id,name,aliases,category&order=name",
+                headers=supabase_headers()
+            )
+            aliases_results = resp2.json() if resp2.status_code == 200 else []
+            # Merge and deduplicate
+            existing_ids = {r['id'] for r in results}
+            for r in aliases_results:
+                if r['id'] not in existing_ids:
+                    results.append(r)
+                    existing_ids.add(r['id'])
+
+    return results[:limit]
+
 # ── SAVE RESULT ─────────────────────────────────────
 @app.post("/api/attempt")
 async def save_attempt(request: Request):
