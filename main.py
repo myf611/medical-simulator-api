@@ -234,6 +234,48 @@ async def save_attempt(request: Request):
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
 
 
+# ── STUDENT: PROFILE ──────────────────────────────────
+@app.get("/api/student-profile")
+async def get_student_profile(student_id: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=id,last_name,first_name,phone,region,city,workplace",
+            headers=supabase_headers()
+        )
+        students = resp.json()
+        if not students:
+            raise HTTPException(404, "Студент не найден")
+    return students[0]
+
+
+@app.put("/api/student-profile")
+async def update_student_profile(request: Request):
+    data = await request.json()
+    student_id = data.get("student_id")
+    if not student_id:
+        raise HTTPException(400, "student_id обязателен")
+
+    update_fields = {}
+    for field in ["last_name", "first_name", "region", "city", "workplace"]:
+        if data.get(field):
+            update_fields[field] = data[field]
+
+    if not update_fields:
+        raise HTTPException(400, "Нет данных для обновления")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}",
+            headers=supabase_headers(),
+            json=update_fields
+        )
+    if resp.status_code not in (200, 204):
+        raise HTTPException(resp.status_code, "Не удалось обновить профиль")
+
+    result = resp.json() if resp.text else [update_fields]
+    return result[0] if result else update_fields
+
+
 # ── STUDENT: OWN HISTORY ─────────────────────────────
 @app.get("/api/student-history")
 async def student_history(student_id: str):
