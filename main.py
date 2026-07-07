@@ -199,14 +199,29 @@ async def lab_search(q: str = "", limit: int = 8):
 @app.post("/api/attempt")
 async def save_attempt(request: Request):
     data = await request.json()
+    student_id = data.get("student_id")
+    if not student_id:
+        raise HTTPException(400, "student_id обязателен")
+
     async with httpx.AsyncClient(timeout=10) as client:
+        # Look up organization_id server-side (don't trust client)
+        student_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=organization_id",
+            headers=supabase_headers()
+        )
+        students = student_resp.json()
+        if not students:
+            raise HTTPException(404, "Студент не найден")
+        organization_id = students[0]["organization_id"]
+
         resp = await client.post(
             f"{SUPABASE_URL}/rest/v1/attempts",
             headers=supabase_headers(),
             json={
-                "student_id": data.get("student_id"),
+                "student_id": student_id,
                 "case_id": data.get("case_id"),
-                "organization_id": data.get("organization_id"),
+                "case_title": data.get("case_title"),
+                "organization_id": organization_id,
                 "finished_at": datetime.utcnow().isoformat(),
                 "grade": data.get("grade"),
                 "diagnosis": data.get("diagnosis"),
@@ -217,6 +232,32 @@ async def save_attempt(request: Request):
             }
         )
     return JSONResponse(content=resp.json(), status_code=resp.status_code)
+
+
+# ── STUDENT: OWN HISTORY ─────────────────────────────
+@app.get("/api/student-history")
+async def student_history(student_id: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,diagnosis,finished_at,duration_seconds",
+            headers=supabase_headers()
+        )
+        attempts = resp.json() if resp.status_code == 200 else []
+
+    grades = [a["grade"] for a in attempts if isinstance(a.get("grade"), (int, float))]
+    total_seconds = sum(a.get("duration_seconds") or 0 for a in attempts)
+
+    avg_grade = round(sum(grades) / len(grades)) if grades else None
+    total_hours = round(total_seconds / 3600, 1) if total_seconds else 0
+
+    return {
+        "attempts": attempts,
+        "stats": {
+            "cases_completed": len(attempts),
+            "average_grade": avg_grade,
+            "total_practice_hours": total_hours
+        }
+    }
 
 # ── ADMIN: GET RESULTS ──────────────────────────────
 @app.get("/api/admin/results")
