@@ -196,6 +196,21 @@ async def lab_search(q: str = "", limit: int = 8):
     return results[:limit]
 
 # ── SAVE RESULT ─────────────────────────────────────
+@app.get("/api/workplace-search")
+async def workplace_search(q: str = "", limit: int = 8):
+    if len(q.strip()) < 2:
+        return []
+    from urllib.parse import quote
+    q_encoded = quote(q.strip(), safe='')
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/workplaces?is_active=eq.true&name=ilike.*{q_encoded}*&limit={limit}&select=id,name,region,category&order=name",
+            headers=supabase_headers()
+        )
+        results = resp.json() if resp.status_code == 200 else []
+    return results[:limit]
+
+
 @app.post("/api/attempt")
 async def save_attempt(request: Request):
     data = await request.json()
