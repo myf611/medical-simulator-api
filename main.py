@@ -301,7 +301,17 @@ async def student_history(student_id: str):
         )
         attempts = resp.json() if resp.status_code == 200 else []
 
-    grades = [a["grade"] for a in attempts if isinstance(a.get("grade"), (int, float))]
+    def to_num(g):
+        if isinstance(g, (int, float)):
+            return g
+        if isinstance(g, str):
+            try:
+                return float(g)
+            except ValueError:
+                return None
+        return None
+
+    grades = [n for n in (to_num(a.get("grade")) for a in attempts) if n is not None]
     total_seconds = sum(a.get("duration_seconds") or 0 for a in attempts)
 
     avg_grade = round(sum(grades) / len(grades)) if grades else None
