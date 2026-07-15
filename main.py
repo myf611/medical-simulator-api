@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import httpx
+import json
 import os
 import re
 from datetime import datetime
@@ -209,6 +210,159 @@ async def workplace_search(q: str = "", limit: int = 8):
         )
         results = resp.json() if resp.status_code == 200 else []
     return results[:limit]
+
+
+
+# ── FINISH ATTEMPT: EVALUATE + SAVE (new 5-block exam flow) ─
+EVALUATOR_SYSTEM = """Ты — опытный клинический преподаватель медицинского вуза. Оцениваешь работу студента по разбору клинического кейса, который прошёл через 5 этапов: сбор анамнеза, физикальный осмотр, предварительный диагноз, назначение анализов, финальный диагноз и план лечения.
+
+ПРАВИЛЬНЫЙ ДИАГНОЗ И ОБОСНОВАНИЕ ты получишь в данных кейса ниже.
+
+Оцени работу студента и верни ТОЛЬКО валидный JSON без каких-либо пояснений до или после, строго в следующем формате:
+
+{
+  "overall_grade": <число от 0 до 100>,
+  "positive_points": [<массив строк — что сделано правильно, конкретно, со ссылкой на этап>],
+  "negative_points": [<массив строк — что пропущено или сделано неверно, конкретно>],
+  "block_grades": {
+    "anamnesis": <0-100>,
+    "exam": <0-100>,
+    "preliminary_diagnosis": <0-100>,
+    "labs": <0-100>,
+    "final": <0-100>
+  }
+}
+
+Правила:
+- positive_points и negative_points должны быть конкретными и объяснять ЗА ЧТО именно (не общими фразами).
+- Каждый пункт — отдельная строка, 1 предложение.
+- overall_grade — средневзвешенная оценка с учётом важности финального диагноза и плана лечения.
+- Если этап не пройден студентом (пустой) — соответствующий block_grade = 0 и упомяни это в negative_points.
+- Отвечай на русском языке."""
+
+
+@app.post("/api/finish-attempt")
+async def finish_attempt(request: Request):
+    if not GROQ_KEY:
+        raise HTTPException(500, "API key not configured")
+
+    data = await request.json()
+    student_id = data.get("student_id")
+    if not student_id:
+        raise HTTPException(400, "student_id обязателен")
+
+    case_title = data.get("case_title", "Кейс")
+    case_context = data.get("case_context", "")
+    blocks = data.get("blocks", {})
+    duration_seconds = data.get("duration_seconds", 0)
+
+    def fmt_transcript(block):
+        msgs = block.get("transcript", [])
+        return "\n".join(f"{m.get('role','?')}: {m.get('text','')}" for m in msgs) or "(пусто, студент не успел)"
+
+    anamnesis = blocks.get("anamnesis", {})
+    exam = blocks.get("exam", {})
+    prelim = blocks.get("preliminary_diagnosis", {})
+    labs = blocks.get("labs", {})
+    final = blocks.get("final", {})
+
+    prompt = f"""ДАННЫЕ КЕЙСА:
+{case_context}
+
+═══ ЭТАП 1: СБОР АНАМНЕЗА ═══
+{fmt_transcript(anamnesis)}
+
+═══ ЭТАП 2: ФИЗИКАЛЬНЫЙ ОСМОТР ═══
+{fmt_transcript(exam)}
+
+═══ ЭТАП 3: ПРЕДВАРИТЕЛЬНЫЙ ДИАГНОЗ ═══
+{prelim.get('text') or '(не указан)'}
+
+═══ ЭТАП 4: НАЗНАЧЕННЫЕ АНАЛИЗЫ/ИССЛЕДОВАНИЯ ═══
+{', '.join(labs.get('ordered', [])) or '(ничего не назначено)'}
+
+═══ ЭТАП 5: ФИНАЛЬНЫЙ ДИАГНОЗ И ПЛАН ЛЕЧЕНИЯ ═══
+Диагноз: {final.get('diagnosis') or '(не указан)'}
+План лечения: {final.get('treatment_plan') or '(не указан)'}
+
+Оцени работу студента по всем 5 этапам согласно инструкции."""
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        groq_resp = await client.post(
+            GROQ_URL,
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": EVALUATOR_SYSTEM},
+                    {"role": "user", "content": prompt}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.3
+            }
+        )
+
+    if groq_resp.status_code != 200:
+        raise HTTPException(502, "Ошибка оценки: сервис ИИ недоступен")
+
+    groq_data = groq_resp.json()
+    try:
+        raw_eval = groq_data["choices"][0]["message"]["content"]
+        evaluation = json.loads(raw_eval)
+    except (KeyError, json.JSONDecodeError, IndexError):
+        evaluation = {
+            "overall_grade": None,
+            "positive_points": [],
+            "negative_points": ["Не удалось автоматически оценить попытку."],
+            "block_grades": {}
+        }
+
+    # Save to Supabase
+    async with httpx.AsyncClient(timeout=10) as client:
+        student_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=organization_id",
+            headers=supabase_headers()
+        )
+        students = student_resp.json()
+        if not students:
+            raise HTTPException(404, "Студент не найден")
+        organization_id = students[0]["organization_id"]
+
+        save_resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/attempts",
+            headers=supabase_headers(),
+            json={
+                "student_id": student_id,
+                "organization_id": organization_id,
+                "case_title": case_title,
+                "finished_at": datetime.utcnow().isoformat(),
+                "grade": evaluation.get("overall_grade"),
+                "diagnosis": final.get("diagnosis"),
+                "treatment_plan": final.get("treatment_plan"),
+                "blocks": blocks,
+                "evaluation": evaluation,
+                "duration_seconds": duration_seconds
+            }
+        )
+
+    saved = save_resp.json() if save_resp.status_code in (200, 201) else None
+    attempt_id = saved[0]["id"] if saved else None
+
+    return {"evaluation": evaluation, "attempt_id": attempt_id}
+
+
+# ── ATTEMPT DETAIL: for reviewing past cases in cabinet ──
+@app.get("/api/attempt-detail")
+async def attempt_detail(attempt_id: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/attempts?id=eq.{attempt_id}&select=*",
+            headers=supabase_headers()
+        )
+    results = resp.json() if resp.status_code == 200 else []
+    if not results:
+        raise HTTPException(404, "Попытка не найдена")
+    return results[0]
 
 
 @app.post("/api/attempt")
