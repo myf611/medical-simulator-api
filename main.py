@@ -260,6 +260,10 @@ async def finish_attempt(request: Request):
         msgs = block.get("transcript", [])
         return "\n".join(f"{m.get('role','?')}: {m.get('text','')}" for m in msgs) or "(пусто, студент не успел)"
 
+    def fmt_ordered(block):
+        items = block.get("ordered", [])
+        return ", ".join(items) if items else "(ничего не выбрано)"
+
     anamnesis = blocks.get("anamnesis", {})
     exam = blocks.get("exam", {})
     prelim = blocks.get("preliminary_diagnosis", {})
@@ -272,8 +276,8 @@ async def finish_attempt(request: Request):
 ═══ ЭТАП 1: СБОР АНАМНЕЗА ═══
 {fmt_transcript(anamnesis)}
 
-═══ ЭТАП 2: ФИЗИКАЛЬНЫЙ ОСМОТР ═══
-{fmt_transcript(exam)}
+═══ ЭТАП 2: ФИЗИКАЛЬНЫЙ ОСМОТР (выбранные пункты осмотра) ═══
+{fmt_ordered(exam)}
 
 ═══ ЭТАП 3: ПРЕДВАРИТЕЛЬНЫЙ ДИАГНОЗ ═══
 {prelim.get('text') or '(не указан)'}
