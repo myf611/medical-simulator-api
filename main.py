@@ -629,6 +629,58 @@ async def admin_student_attempts(student_id: str):
     return resp.json() if resp.status_code == 200 else []
 
 
+
+# ── FEEDBACK (restricted submission, admin panel view) ───
+@app.post("/api/feedback")
+async def submit_feedback(request: Request):
+    data = await request.json()
+    student_id = data.get("student_id")
+    phone = data.get("phone", "")
+    message = (data.get("message") or "").strip()
+    page = data.get("page", "")
+
+    if not message:
+        raise HTTPException(400, "Сообщение не может быть пустым")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/feedback",
+            headers=supabase_headers(),
+            json={
+                "student_id": student_id,
+                "phone": phone,
+                "message": message,
+                "page": page
+            }
+        )
+    if resp.status_code not in (200, 201):
+        raise HTTPException(500, "Не удалось сохранить обратную связь")
+    return {"ok": True}
+
+
+@app.get("/api/feedback")
+async def list_feedback():
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/feedback?order=created_at.desc&select=*",
+            headers=supabase_headers()
+        )
+    return resp.json() if resp.status_code == 200 else []
+
+
+@app.put("/api/feedback/{feedback_id}/status")
+async def update_feedback_status(feedback_id: str, request: Request):
+    data = await request.json()
+    status = data.get("status", "new")
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/feedback?id=eq.{feedback_id}",
+            headers=supabase_headers(),
+            json={"status": status}
+        )
+    return {"ok": resp.status_code in (200, 204)}
+
+
 @app.get("/api/admin/results")
 async def get_results(org_slug: str, admin_key: str):
     if admin_key != os.environ.get("ADMIN_KEY", "admin123"):
