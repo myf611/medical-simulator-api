@@ -485,6 +485,150 @@ async def student_history(student_id: str):
     }
 
 # ── ADMIN: GET RESULTS ──────────────────────────────
+
+# ── ADMIN / INSTRUCTOR AUTH ───────────────────────────
+import hashlib
+import secrets
+
+def hash_password(password: str, salt: str = None) -> tuple:
+    if salt is None:
+        salt = secrets.token_hex(16)
+    pwd_hash = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
+    return pwd_hash, salt
+
+
+@app.post("/api/admin-register")
+async def admin_register(request: Request):
+    data = await request.json()
+    username = (data.get("username") or "").strip().lower()
+    password = data.get("password") or ""
+    full_name = (data.get("full_name") or "").strip()
+    org_slug = data.get("org_slug") or "tashkent-endo"
+
+    if not username or len(password) < 6:
+        raise HTTPException(400, "Логин обязателен, пароль минимум 6 символов")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        existing = await client.get(
+            f"{SUPABASE_URL}/rest/v1/admins?username=eq.{username}",
+            headers=supabase_headers()
+        )
+        if existing.json():
+            raise HTTPException(409, "Этот логин уже занят")
+
+        org_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/organizations?slug=eq.{org_slug}",
+            headers=supabase_headers()
+        )
+        orgs = org_resp.json()
+        if not orgs:
+            raise HTTPException(404, "Организация не найдена")
+        organization_id = orgs[0]["id"]
+
+        pwd_hash, salt = hash_password(password)
+
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/admins",
+            headers=supabase_headers(),
+            json={
+                "organization_id": organization_id,
+                "username": username,
+                "password_hash": pwd_hash,
+                "password_salt": salt,
+                "full_name": full_name
+            }
+        )
+    if resp.status_code not in (200, 201):
+        raise HTTPException(500, "Не удалось создать аккаунт")
+
+    created = resp.json()[0]
+    return {"admin_id": created["id"], "username": username, "full_name": full_name, "organization_id": organization_id}
+
+
+@app.post("/api/admin-login")
+async def admin_login(request: Request):
+    data = await request.json()
+    username = (data.get("username") or "").strip().lower()
+    password = data.get("password") or ""
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/admins?username=eq.{username}&is_active=eq.true",
+            headers=supabase_headers()
+        )
+    admins = resp.json()
+    if not admins:
+        raise HTTPException(401, "Неверный логин или пароль")
+
+    admin = admins[0]
+    check_hash, _ = hash_password(password, admin["password_salt"])
+    if check_hash != admin["password_hash"]:
+        raise HTTPException(401, "Неверный логин или пароль")
+
+    return {
+        "admin_id": admin["id"],
+        "username": admin["username"],
+        "full_name": admin.get("full_name", ""),
+        "organization_id": admin["organization_id"]
+    }
+
+
+@app.get("/api/admin/students")
+async def admin_students(organization_id: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        students_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?organization_id=eq.{organization_id}&select=id,first_name,last_name,phone,workplace&order=last_name",
+            headers=supabase_headers()
+        )
+        students = students_resp.json()
+
+        attempts_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/attempts?organization_id=eq.{organization_id}&select=student_id,grade",
+            headers=supabase_headers()
+        )
+        attempts = attempts_resp.json()
+
+    stats_by_student = {}
+    for a in attempts:
+        sid = a.get("student_id")
+        if sid not in stats_by_student:
+            stats_by_student[sid] = {"count": 0, "grades": []}
+        stats_by_student[sid]["count"] += 1
+        g = a.get("grade")
+        if isinstance(g, (int, float)):
+            stats_by_student[sid]["grades"].append(g)
+        elif isinstance(g, str):
+            try:
+                stats_by_student[sid]["grades"].append(float(g))
+            except ValueError:
+                pass
+
+    result = []
+    for s in students:
+        stat = stats_by_student.get(s["id"], {"count": 0, "grades": []})
+        avg = round(sum(stat["grades"]) / len(stat["grades"])) if stat["grades"] else None
+        result.append({
+            "id": s["id"],
+            "name": f"{s.get('last_name','')} {s.get('first_name','')}".strip(),
+            "phone": s.get("phone"),
+            "workplace": s.get("workplace"),
+            "cases_completed": stat["count"],
+            "average_grade": avg
+        })
+
+    return result
+
+
+@app.get("/api/admin/student-attempts")
+async def admin_student_attempts(student_id: str):
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,finished_at,duration_seconds",
+            headers=supabase_headers()
+        )
+    return resp.json() if resp.status_code == 200 else []
+
+
 @app.get("/api/admin/results")
 async def get_results(org_slug: str, admin_key: str):
     if admin_key != os.environ.get("ADMIN_KEY", "admin123"):
