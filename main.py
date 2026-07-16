@@ -111,7 +111,7 @@ async def register(request: Request):
         if existing.json():
             # Return existing student
             student = existing.json()[0]
-            return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "existing": True}
+            return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "phone": student.get("phone",""), "existing": True}
 
         # Create student
         create_resp = await client.post(
@@ -128,7 +128,7 @@ async def register(request: Request):
             }
         )
         student = create_resp.json()[0]
-        return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "existing": False}
+        return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "phone": student.get("phone",""), "existing": False}
 
 
 # ── LOGIN ────────────────────────────────────────────
@@ -161,6 +161,7 @@ async def login(request: Request):
         return {
             "student_id": student["id"],
             "name": f"{student['last_name']} {student['first_name']}",
+            "phone": student.get("phone", ""),
             "existing": True
         }
 
