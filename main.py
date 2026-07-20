@@ -577,9 +577,12 @@ async def admin_register(request: Request):
     if phone not in ADMIN_ALLOWED_PHONES:
         raise HTTPException(403, "Регистрация преподавателя недоступна для этого номера")
 
+    from urllib.parse import quote
+    phone_encoded = quote(phone, safe='')
+
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
-            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone}",
+            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone_encoded}",
             headers=supabase_headers()
         )
         if existing.json():
@@ -622,9 +625,12 @@ async def admin_login(request: Request):
     raw_phone = (data.get("phone") or "").strip()
     phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
 
+    from urllib.parse import quote
+    phone_encoded = quote(phone, safe='')
+
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone}&is_active=eq.true",
+            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone_encoded}&is_active=eq.true",
             headers=supabase_headers()
         )
     admins = resp.json()
