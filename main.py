@@ -562,15 +562,14 @@ ADMIN_ALLOWED_PHONES = {"+998900060611", "+998909111752", "+998933814560"}
 @app.post("/api/admin-register")
 async def admin_register(request: Request):
     data = await request.json()
-    username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
     full_name = (data.get("full_name") or "").strip()
     org_slug = data.get("org_slug") or "tashkent-endo"
     raw_phone = (data.get("phone") or "").strip()
     phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
 
-    if not username or len(password) < 6:
-        raise HTTPException(400, "Логин обязателен, пароль минимум 6 символов")
+    if len(password) < 6:
+        raise HTTPException(400, "Пароль минимум 6 символов")
 
     if not UZ_PHONE_REGEX.match(phone):
         raise HTTPException(400, f"Неверный формат номера: {phone}")
@@ -580,11 +579,11 @@ async def admin_register(request: Request):
 
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
-            f"{SUPABASE_URL}/rest/v1/admins?username=eq.{username}",
+            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone}",
             headers=supabase_headers()
         )
         if existing.json():
-            raise HTTPException(409, "Этот логин уже занят")
+            raise HTTPException(409, "Этот номер уже зарегистрирован")
 
         org_resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/organizations?slug=eq.{org_slug}",
@@ -602,7 +601,7 @@ async def admin_register(request: Request):
             headers=supabase_headers(),
             json={
                 "organization_id": organization_id,
-                "username": username,
+                "username": phone,
                 "password_hash": pwd_hash,
                 "password_salt": salt,
                 "full_name": full_name,
@@ -613,32 +612,33 @@ async def admin_register(request: Request):
         raise HTTPException(500, "Не удалось создать аккаунт")
 
     created = resp.json()[0]
-    return {"admin_id": created["id"], "username": username, "full_name": full_name, "organization_id": organization_id}
+    return {"admin_id": created["id"], "phone": phone, "full_name": full_name, "organization_id": organization_id}
 
 
 @app.post("/api/admin-login")
 async def admin_login(request: Request):
     data = await request.json()
-    username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
+    raw_phone = (data.get("phone") or "").strip()
+    phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/admins?username=eq.{username}&is_active=eq.true",
+            f"{SUPABASE_URL}/rest/v1/admins?phone=eq.{phone}&is_active=eq.true",
             headers=supabase_headers()
         )
     admins = resp.json()
     if not admins:
-        raise HTTPException(401, "Неверный логин или пароль")
+        raise HTTPException(401, "Неверный номер или пароль")
 
     admin = admins[0]
     check_hash, _ = hash_password(password, admin["password_salt"])
     if check_hash != admin["password_hash"]:
-        raise HTTPException(401, "Неверный логин или пароль")
+        raise HTTPException(401, "Неверный номер или пароль")
 
     return {
         "admin_id": admin["id"],
-        "username": admin["username"],
+        "phone": admin["phone"],
         "full_name": admin.get("full_name", ""),
         "organization_id": admin["organization_id"]
     }
