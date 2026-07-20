@@ -215,7 +215,8 @@ async def workplace_search(q: str = "", limit: int = 8):
 
 
 # ── FINISH ATTEMPT: EVALUATE + SAVE (new 5-block exam flow) ─
-EVALUATOR_SYSTEM = """Ты — опытный клинический преподаватель медицинского вуза. Оцениваешь работу студента по разбору клинического кейса, который прошёл через 5 этапов: сбор анамнеза, физикальный осмотр, предварительный диагноз, назначение анализов, финальный диагноз и план лечения.
+EVALUATOR_SYSTEMS = {
+"ru": """Ты — опытный клинический преподаватель медицинского вуза. Оцениваешь работу студента по разбору клинического кейса, который прошёл через 5 этапов: сбор анамнеза, физикальный осмотр, предварительный диагноз, назначение анализов, финальный диагноз и план лечения.
 
 ПРАВИЛЬНЫЙ ДИАГНОЗ И ОБОСНОВАНИЕ ты получишь в данных кейса ниже.
 
@@ -239,7 +240,33 @@ EVALUATOR_SYSTEM = """Ты — опытный клинический препо�
 - Каждый пункт — отдельная строка, 1 предложение.
 - overall_grade — средневзвешенная оценка с учётом важности финального диагноза и плана лечения.
 - Если этап не пройден студентом (пустой) — соответствующий block_grade = 0 и упомяни это в negative_points.
-- Отвечай на русском языке."""
+- Отвечай на русском языке.""",
+"en": """You are an experienced clinical instructor at a medical school. You are evaluating a student's work on a clinical case that went through 5 stages: history taking, physical examination, preliminary diagnosis, ordering labs/investigations, final diagnosis and treatment plan.
+
+You will receive the CORRECT DIAGNOSIS AND RATIONALE in the case data below.
+
+Evaluate the student's work and return ONLY valid JSON with no explanation before or after, strictly in the following format:
+
+{
+  "overall_grade": <number from 0 to 100>,
+  "positive_points": [<array of strings — what was done correctly, specific, referencing the stage>],
+  "negative_points": [<array of strings — what was missed or done incorrectly, specific>],
+  "block_grades": {
+    "anamnesis": <0-100>,
+    "exam": <0-100>,
+    "preliminary_diagnosis": <0-100>,
+    "labs": <0-100>,
+    "final": <0-100>
+  }
+}
+
+Rules:
+- positive_points and negative_points must be specific and explain EXACTLY WHY (not generic phrases).
+- Each point is a separate string, 1 sentence.
+- overall_grade is a weighted average, giving importance to the final diagnosis and treatment plan.
+- If a stage was not completed by the student (empty) — the corresponding block_grade = 0 and mention this in negative_points.
+- Respond entirely in English."""
+}
 
 
 @app.post("/api/finish-attempt")
@@ -252,18 +279,27 @@ async def finish_attempt(request: Request):
     if not student_id:
         raise HTTPException(400, "student_id обязателен")
 
-    case_title = data.get("case_title", "Кейс")
+    lang = data.get("lang", "ru")
+    if lang not in EVALUATOR_SYSTEMS:
+        lang = "ru"
+
+    case_title = data.get("case_title", "Кейс" if lang == "ru" else "Case")
     case_context = data.get("case_context", "")
     blocks = data.get("blocks", {})
     duration_seconds = data.get("duration_seconds", 0)
 
+    empty_stage_text = {"ru": "(пусто, студент не успел)", "en": "(empty, student did not complete)"}[lang]
+    nothing_selected_text = {"ru": "(ничего не выбрано)", "en": "(nothing selected)"}[lang]
+    nothing_ordered_text = {"ru": "(ничего не назначено)", "en": "(nothing ordered)"}[lang]
+    not_specified_text = {"ru": "(не указан)", "en": "(not specified)"}[lang]
+
     def fmt_transcript(block):
         msgs = block.get("transcript", [])
-        return "\n".join(f"{m.get('role','?')}: {m.get('text','')}" for m in msgs) or "(пусто, студент не успел)"
+        return "\n".join(f"{m.get('role','?')}: {m.get('text','')}" for m in msgs) or empty_stage_text
 
     def fmt_ordered(block):
         items = block.get("ordered", [])
-        return ", ".join(items) if items else "(ничего не выбрано)"
+        return ", ".join(items) if items else nothing_selected_text
 
     anamnesis = blocks.get("anamnesis", {})
     exam = blocks.get("exam", {})
@@ -271,7 +307,29 @@ async def finish_attempt(request: Request):
     labs = blocks.get("labs", {})
     final = blocks.get("final", {})
 
-    prompt = f"""ДАННЫЕ КЕЙСА:
+    if lang == "en":
+        prompt = f"""CASE DATA:
+{case_context}
+
+═══ STAGE 1: HISTORY TAKING ═══
+{fmt_transcript(anamnesis)}
+
+═══ STAGE 2: PHYSICAL EXAMINATION (selected items) ═══
+{fmt_ordered(exam)}
+
+═══ STAGE 3: PRELIMINARY DIAGNOSIS ═══
+{prelim.get('text') or not_specified_text}
+
+═══ STAGE 4: ORDERED LABS/INVESTIGATIONS ═══
+{', '.join(labs.get('ordered', [])) or nothing_ordered_text}
+
+═══ STAGE 5: FINAL DIAGNOSIS AND TREATMENT PLAN ═══
+Diagnosis: {final.get('diagnosis') or not_specified_text}
+Treatment plan: {final.get('treatment_plan') or not_specified_text}
+
+Evaluate the student's work across all 5 stages according to the instructions."""
+    else:
+        prompt = f"""ДАННЫЕ КЕЙСА:
 {case_context}
 
 ═══ ЭТАП 1: СБОР АНАМНЕЗА ═══
@@ -281,14 +339,14 @@ async def finish_attempt(request: Request):
 {fmt_ordered(exam)}
 
 ═══ ЭТАП 3: ПРЕДВАРИТЕЛЬНЫЙ ДИАГНОЗ ═══
-{prelim.get('text') or '(не указан)'}
+{prelim.get('text') or not_specified_text}
 
 ═══ ЭТАП 4: НАЗНАЧЕННЫЕ АНАЛИЗЫ/ИССЛЕДОВАНИЯ ═══
-{', '.join(labs.get('ordered', [])) or '(ничего не назначено)'}
+{', '.join(labs.get('ordered', [])) or nothing_ordered_text}
 
 ═══ ЭТАП 5: ФИНАЛЬНЫЙ ДИАГНОЗ И ПЛАН ЛЕЧЕНИЯ ═══
-Диагноз: {final.get('diagnosis') or '(не указан)'}
-План лечения: {final.get('treatment_plan') or '(не указан)'}
+Диагноз: {final.get('diagnosis') or not_specified_text}
+План лечения: {final.get('treatment_plan') or not_specified_text}
 
 Оцени работу студента по всем 5 этапам согласно инструкции."""
 
@@ -299,7 +357,7 @@ async def finish_attempt(request: Request):
             json={
                 "model": "llama-3.3-70b-versatile",
                 "messages": [
-                    {"role": "system", "content": EVALUATOR_SYSTEM},
+                    {"role": "system", "content": EVALUATOR_SYSTEMS[lang]},
                     {"role": "user", "content": prompt}
                 ],
                 "response_format": {"type": "json_object"},
@@ -315,10 +373,11 @@ async def finish_attempt(request: Request):
         raw_eval = groq_data["choices"][0]["message"]["content"]
         evaluation = json.loads(raw_eval)
     except (KeyError, json.JSONDecodeError, IndexError):
+        fallback_msg = {"ru": "Не удалось автоматически оценить попытку.", "en": "Failed to automatically evaluate the attempt."}[lang]
         evaluation = {
             "overall_grade": None,
             "positive_points": [],
-            "negative_points": ["Не удалось автоматически оценить попытку."],
+            "negative_points": [fallback_msg],
             "block_grades": {}
         }
 
