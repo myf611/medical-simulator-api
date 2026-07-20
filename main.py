@@ -557,6 +557,8 @@ def hash_password(password: str, salt: str = None) -> tuple:
     return pwd_hash, salt
 
 
+ADMIN_ALLOWED_PHONES = {"+998900060611", "+998909111752", "+998933814560"}
+
 @app.post("/api/admin-register")
 async def admin_register(request: Request):
     data = await request.json()
@@ -564,9 +566,17 @@ async def admin_register(request: Request):
     password = data.get("password") or ""
     full_name = (data.get("full_name") or "").strip()
     org_slug = data.get("org_slug") or "tashkent-endo"
+    raw_phone = (data.get("phone") or "").strip()
+    phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
 
     if not username or len(password) < 6:
         raise HTTPException(400, "Логин обязателен, пароль минимум 6 символов")
+
+    if not UZ_PHONE_REGEX.match(phone):
+        raise HTTPException(400, f"Неверный формат номера: {phone}")
+
+    if phone not in ADMIN_ALLOWED_PHONES:
+        raise HTTPException(403, "Регистрация преподавателя недоступна для этого номера")
 
     async with httpx.AsyncClient(timeout=10) as client:
         existing = await client.get(
@@ -595,7 +605,8 @@ async def admin_register(request: Request):
                 "username": username,
                 "password_hash": pwd_hash,
                 "password_salt": salt,
-                "full_name": full_name
+                "full_name": full_name,
+                "phone": phone
             }
         )
     if resp.status_code not in (200, 201):
