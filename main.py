@@ -64,6 +64,7 @@ async def register(request: Request):
     first_name = data.get("first_name", "").strip()
     raw = data.get("phone", "").strip()
     phone = '+' + raw.replace('+', '').replace(' ', '').replace('-', '')
+    password = data.get("password", "")
     workplace = data.get("workplace", "").strip()
     region = data.get("region", "").strip()
     city = data.get("city", "").strip()
@@ -74,6 +75,8 @@ async def register(request: Request):
         raise HTTPException(400, "Введите фамилию и имя")
     if not UZ_PHONE_REGEX.match(phone):
         raise HTTPException(400, "Неверный формат номера. Пример: +998901234567")
+    if len(password) < 6:
+        raise HTTPException(400, "Пароль минимум 6 символов")
 
     async with httpx.AsyncClient(timeout=10) as client:
         # Get organization
@@ -109,9 +112,9 @@ async def register(request: Request):
             headers=supabase_headers()
         )
         if existing.json():
-            # Return existing student
-            student = existing.json()[0]
-            return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "phone": student.get("phone",""), "existing": True}
+            raise HTTPException(409, "Этот номер уже зарегистрирован. Войдите вместо регистрации.")
+
+        pwd_hash, salt = hash_password(password)
 
         # Create student
         create_resp = await client.post(
@@ -122,11 +125,15 @@ async def register(request: Request):
                 "last_name": last_name,
                 "first_name": first_name,
                 "phone": phone,
+                "password_hash": pwd_hash,
+                "password_salt": salt,
                 "workplace": workplace,
                 "region": region,
                 "city": city
             }
         )
+        if create_resp.status_code not in (200, 201):
+            raise HTTPException(500, "Не удалось создать аккаунт")
         student = create_resp.json()[0]
         return {"student_id": student["id"], "name": f"{student['last_name']} {student['first_name']}", "phone": student.get("phone",""), "existing": False}
 
@@ -139,12 +146,12 @@ async def login(request: Request):
     raw_phone = data.get("phone", "").strip()
     # Remove spaces from phone number
     phone = '+' + raw_phone.replace('+', '').replace(' ', '').replace('-', '')
+    password = data.get("password", "")
     org_slug = data.get("org_slug", "tashkent-endo")
 
     if not UZ_PHONE_REGEX.match(phone):
         raise HTTPException(400, f"Неверный формат номера: {phone}")
 
-    print(f"LOGIN: searching phone={phone!r}")
     from urllib.parse import quote
     phone_encoded = quote(phone, safe='')
     async with httpx.AsyncClient(timeout=10) as client:
@@ -152,12 +159,19 @@ async def login(request: Request):
             f"{SUPABASE_URL}/rest/v1/students?phone=eq.{phone_encoded}&is_active=eq.true",
             headers=supabase_headers()
         )
-        print(f"LOGIN: supabase response status={existing.status_code} body={existing.text[:200]}")
         students = existing.json()
         if not students:
             raise HTTPException(404, f"Номер не найден: {phone}")
 
         student = students[0]
+
+        if not student.get("password_hash"):
+            raise HTTPException(401, "У аккаунта не задан пароль. Обратитесь к администратору.")
+
+        check_hash, _ = hash_password(password, student["password_salt"])
+        if check_hash != student["password_hash"]:
+            raise HTTPException(401, "Неверный номер или пароль")
+
         return {
             "student_id": student["id"],
             "name": f"{student['last_name']} {student['first_name']}",
