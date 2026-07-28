@@ -224,9 +224,6 @@ async def register(request: Request):
     if len(password) < 6:
         raise HTTPException(400, "Пароль минимум 6 символов")
 
-    if not await is_phone_verified(phone):
-        raise HTTPException(403, "Подтвердите номер через Telegram перед регистрацией")
-
     async with httpx.AsyncClient(timeout=10) as client:
         # Get organization
         org_resp = await client.get(
