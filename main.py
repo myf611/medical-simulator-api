@@ -21,6 +21,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
 UZ_PHONE_REGEX = re.compile(r"^\+998(90|91|93|94|95|97|98|99)\d{7}$")
 
 def supabase_headers():
@@ -57,6 +60,149 @@ async def chat(request: Request):
     return JSONResponse(content=response.json(), status_code=response.status_code)
 
 # ── STUDENT REGISTRATION ────────────────────────────
+# ── TELEGRAM VERIFICATION ──────────────────────────────
+import random
+from datetime import timedelta
+from urllib.parse import quote as urlquote
+
+
+def normalize_phone_str(raw: str) -> str:
+    raw = (raw or "").strip()
+    return '+' + raw.replace('+', '').replace(' ', '').replace('-', '')
+
+
+@app.post("/api/telegram-webhook")
+async def telegram_webhook(request: Request):
+    if not TELEGRAM_BOT_TOKEN:
+        return {"ok": True}
+    update = await request.json()
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    username = chat.get("username", "")
+    text = message.get("text", "")
+    contact = message.get("contact")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        if contact:
+            phone = normalize_phone_str(contact.get("phone_number", ""))
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/telegram_links",
+                headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+                params={"on_conflict": "phone"},
+                json={"phone": phone, "chat_id": chat_id, "telegram_username": username}
+            )
+            await client.post(
+                f"{TELEGRAM_API}/sendMessage",
+                json={"chat_id": chat_id, "text": "Готово! Номер привязан ✅ Теперь вернитесь на сайт и нажмите «Получить код»."}
+            )
+        elif text == "/start":
+            keyboard = {
+                "keyboard": [[{"text": "📱 Отправить номер телефона", "request_contact": True}]],
+                "resize_keyboard": True,
+                "one_time_keyboard": True
+            }
+            await client.post(
+                f"{TELEGRAM_API}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": "Здравствуйте! Это бот подтверждения номера для «Симулятора пациента».\n\nНажмите кнопку ниже, чтобы поделиться номером телефона.",
+                    "reply_markup": keyboard
+                }
+            )
+        else:
+            await client.post(
+                f"{TELEGRAM_API}/sendMessage",
+                json={"chat_id": chat_id, "text": "Отправьте /start чтобы начать."}
+            )
+    return {"ok": True}
+
+
+@app.post("/api/telegram-send-code")
+async def telegram_send_code(request: Request):
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(500, "Telegram бот не настроен")
+    data = await request.json()
+    phone = normalize_phone_str(data.get("phone", ""))
+    if not UZ_PHONE_REGEX.match(phone):
+        raise HTTPException(400, f"Неверный формат номера: {phone}")
+
+    phone_encoded = urlquote(phone, safe='')
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        link_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/telegram_links?phone=eq.{phone_encoded}",
+            headers=supabase_headers()
+        )
+        links = link_resp.json()
+        if not links:
+            raise HTTPException(404, "Сначала напишите боту /start и поделитесь номером в Telegram")
+        chat_id = links[0]["chat_id"]
+
+        code = str(random.randint(100000, 999999))
+        expires_at = (datetime.utcnow() + timedelta(minutes=10)).isoformat()
+
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/telegram_verifications",
+            headers=supabase_headers(),
+            json={"phone": phone, "code": code, "expires_at": expires_at}
+        )
+
+        send_resp = await client.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": chat_id, "text": f"Ваш код подтверждения: {code}\n\nДействителен 10 минут."}
+        )
+        if send_resp.status_code != 200:
+            raise HTTPException(502, "Не удалось отправить код в Telegram")
+
+    return {"ok": True}
+
+
+@app.post("/api/telegram-verify-code")
+async def telegram_verify_code(request: Request):
+    data = await request.json()
+    phone = normalize_phone_str(data.get("phone", ""))
+    code = (data.get("code") or "").strip()
+
+    phone_encoded = urlquote(phone, safe='')
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/telegram_verifications?phone=eq.{phone_encoded}&code=eq.{code}&verified=eq.false&order=created_at.desc&limit=1",
+            headers=supabase_headers()
+        )
+        rows = resp.json()
+        if not rows:
+            raise HTTPException(400, "Неверный код")
+
+        row = rows[0]
+        expires_at = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        if expires_at < datetime.now(expires_at.tzinfo):
+            raise HTTPException(400, "Код истёк, запросите новый")
+
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/telegram_verifications?id=eq.{row['id']}",
+            headers=supabase_headers(),
+            json={"verified": True, "verified_at": datetime.utcnow().isoformat()}
+        )
+
+    return {"ok": True}
+
+
+async def is_phone_verified(phone: str) -> bool:
+    phone_encoded = urlquote(phone, safe='')
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/telegram_verifications?phone=eq.{phone_encoded}&verified=eq.true&order=verified_at.desc&limit=1",
+            headers=supabase_headers()
+        )
+    rows = resp.json()
+    if not rows:
+        return False
+    verified_at = datetime.fromisoformat(rows[0]["verified_at"].replace("Z", "+00:00"))
+    return (datetime.now(verified_at.tzinfo) - verified_at) < timedelta(minutes=30)
+
+
 @app.post("/api/register")
 async def register(request: Request):
     data = await request.json()
@@ -77,6 +223,9 @@ async def register(request: Request):
         raise HTTPException(400, "Неверный формат номера. Пример: +998901234567")
     if len(password) < 6:
         raise HTTPException(400, "Пароль минимум 6 символов")
+
+    if not await is_phone_verified(phone):
+        raise HTTPException(403, "Подтвердите номер через Telegram перед регистрацией")
 
     async with httpx.AsyncClient(timeout=10) as client:
         # Get organization
