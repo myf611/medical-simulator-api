@@ -1,6 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException
+from uuid import UUID
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import httpx
 import json
 import os
@@ -9,9 +13,13 @@ from datetime import datetime
 
 app = FastAPI()
 
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://myf611.github.io"],
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -119,6 +127,7 @@ async def telegram_webhook(request: Request):
 
 
 @app.post("/api/telegram-send-code")
+@limiter.limit("3/minute")
 async def telegram_send_code(request: Request):
     if not TELEGRAM_BOT_TOKEN:
         raise HTTPException(500, "Telegram бот не настроен")
@@ -189,21 +198,8 @@ async def telegram_verify_code(request: Request):
     return {"ok": True}
 
 
-async def is_phone_verified(phone: str) -> bool:
-    phone_encoded = urlquote(phone, safe='')
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/telegram_verifications?phone=eq.{phone_encoded}&verified=eq.true&order=verified_at.desc&limit=1",
-            headers=supabase_headers()
-        )
-    rows = resp.json()
-    if not rows:
-        return False
-    verified_at = datetime.fromisoformat(rows[0]["verified_at"].replace("Z", "+00:00"))
-    return (datetime.now(verified_at.tzinfo) - verified_at) < timedelta(minutes=30)
-
-
 @app.post("/api/register")
+@limiter.limit("5/minute")
 async def register(request: Request):
     data = await request.json()
     last_name = data.get("last_name", "").strip()
@@ -286,6 +282,7 @@ async def register(request: Request):
 
 # ── LOGIN ────────────────────────────────────────────
 @app.post("/api/login")
+@limiter.limit("10/minute")
 async def login(request: Request):
     data = await request.json()
     # Normalize phone - remove all spaces and non-digits except leading +
@@ -577,10 +574,10 @@ Evaluate the student's work across all 5 stages according to the instructions.""
 
 # ── ATTEMPT DETAIL: for reviewing past cases in cabinet ──
 @app.get("/api/attempt-detail")
-async def attempt_detail(attempt_id: str):
+async def attempt_detail(attempt_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/attempts?id=eq.{attempt_id}&select=*",
+            f"{SUPABASE_URL}/rest/v1/attempts?id=eq.{str(attempt_id)}&select=*",
             headers=supabase_headers()
         )
     results = resp.json() if resp.status_code == 200 else []
@@ -589,47 +586,9 @@ async def attempt_detail(attempt_id: str):
     return results[0]
 
 
-@app.post("/api/attempt")
-async def save_attempt(request: Request):
-    data = await request.json()
-    student_id = data.get("student_id")
-    if not student_id:
-        raise HTTPException(400, "student_id обязателен")
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        # Look up organization_id server-side (don't trust client)
-        student_resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=organization_id",
-            headers=supabase_headers()
-        )
-        students = student_resp.json()
-        if not students:
-            raise HTTPException(404, "Студент не найден")
-        organization_id = students[0]["organization_id"]
-
-        resp = await client.post(
-            f"{SUPABASE_URL}/rest/v1/attempts",
-            headers=supabase_headers(),
-            json={
-                "student_id": student_id,
-                "case_id": data.get("case_id"),
-                "case_title": data.get("case_title"),
-                "organization_id": organization_id,
-                "finished_at": datetime.utcnow().isoformat(),
-                "grade": data.get("grade"),
-                "diagnosis": data.get("diagnosis"),
-                "workup_plan": data.get("workup_plan"),
-                "treatment_plan": data.get("treatment_plan"),
-                "transcript": data.get("transcript", []),
-                "duration_seconds": data.get("duration_seconds")
-            }
-        )
-    return JSONResponse(content=resp.json(), status_code=resp.status_code)
-
-
 # ── STUDENT: PROFILE ──────────────────────────────────
 @app.get("/api/student-profile")
-async def get_student_profile(student_id: str):
+async def get_student_profile(student_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=id,last_name,first_name,phone,region,city,workplace",
@@ -671,7 +630,7 @@ async def update_student_profile(request: Request):
 
 # ── STUDENT: OWN HISTORY ─────────────────────────────
 @app.get("/api/student-history")
-async def student_history(student_id: str):
+async def student_history(student_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,diagnosis,finished_at,duration_seconds",
@@ -720,6 +679,7 @@ def hash_password(password: str, salt: str = None) -> tuple:
 ADMIN_ALLOWED_PHONES = {"+998900060611", "+998909111752", "+998933814560"}
 
 @app.post("/api/admin-register")
+@limiter.limit("5/minute")
 async def admin_register(request: Request):
     data = await request.json()
     password = data.get("password") or ""
@@ -779,6 +739,7 @@ async def admin_register(request: Request):
 
 
 @app.post("/api/admin-login")
+@limiter.limit("10/minute")
 async def admin_login(request: Request):
     data = await request.json()
     password = data.get("password") or ""
@@ -811,7 +772,7 @@ async def admin_login(request: Request):
 
 
 @app.get("/api/admin/students")
-async def admin_students(organization_id: str):
+async def admin_students(organization_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         students_resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/students?organization_id=eq.{organization_id}&select=id,first_name,last_name,phone,workplace&order=last_name",
@@ -857,7 +818,7 @@ async def admin_students(organization_id: str):
 
 
 @app.get("/api/admin/student-attempts")
-async def admin_student_attempts(student_id: str):
+async def admin_student_attempts(student_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,finished_at,duration_seconds",
@@ -906,7 +867,7 @@ async def list_feedback():
 
 
 @app.put("/api/feedback/{feedback_id}/status")
-async def update_feedback_status(feedback_id: str, request: Request):
+async def update_feedback_status(feedback_id: UUID, request: Request):
     data = await request.json()
     status = data.get("status", "new")
     async with httpx.AsyncClient(timeout=10) as client:
@@ -918,21 +879,4 @@ async def update_feedback_status(feedback_id: str, request: Request):
     return {"ok": resp.status_code in (200, 204)}
 
 
-@app.get("/api/admin/results")
-async def get_results(org_slug: str, admin_key: str):
-    if admin_key != os.environ.get("ADMIN_KEY", "admin123"):
-        raise HTTPException(403, "Нет доступа")
-    async with httpx.AsyncClient(timeout=10) as client:
-        org_resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/organizations?slug=eq.{org_slug}",
-            headers=supabase_headers()
-        )
-        if not org_resp.json():
-            raise HTTPException(404, "Организация не найдена")
-        org_id = org_resp.json()[0]["id"]
 
-        results = await client.get(
-            f"{SUPABASE_URL}/rest/v1/attempts?organization_id=eq.{org_id}&order=finished_at.desc",
-            headers=supabase_headers()
-        )
-    return results.json()
