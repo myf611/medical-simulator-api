@@ -24,6 +24,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    return response
+
 GROQ_KEY = os.environ.get("GROQ_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -168,6 +178,7 @@ async def telegram_send_code(request: Request):
 
 
 @app.post("/api/telegram-verify-code")
+@limiter.limit("10/minute")
 async def telegram_verify_code(request: Request):
     data = await request.json()
     phone = normalize_phone_str(data.get("phone", ""))
@@ -676,6 +687,41 @@ def hash_password(password: str, salt: str = None) -> tuple:
     return pwd_hash, salt
 
 
+def generate_admin_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+async def require_admin(request: Request) -> dict:
+    """Validates the Authorization: Bearer <token> header and returns the admin record.
+    Raises 401 if missing/invalid/expired."""
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Требуется вход преподавателя")
+    token = auth_header[7:]
+
+    from urllib.parse import quote
+    token_encoded = quote(token, safe='')
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/admins?session_token=eq.{token_encoded}&is_active=eq.true",
+            headers=supabase_headers()
+        )
+    admins = resp.json()
+    if not admins:
+        raise HTTPException(401, "Сессия недействительна, войдите заново")
+
+    admin = admins[0]
+    expires_raw = admin.get("session_expires_at")
+    if not expires_raw:
+        raise HTTPException(401, "Сессия недействительна, войдите заново")
+    expires_at = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+    if datetime.now(expires_at.tzinfo) > expires_at:
+        raise HTTPException(401, "Сессия истекла, войдите заново")
+
+    return admin
+
+
 ADMIN_ALLOWED_PHONES = {"+998900060611", "+998909111752", "+998933814560"}
 
 @app.post("/api/admin-register")
@@ -718,6 +764,8 @@ async def admin_register(request: Request):
         organization_id = orgs[0]["id"]
 
         pwd_hash, salt = hash_password(password)
+        token = generate_admin_token()
+        expires_at = (datetime.utcnow() + timedelta(days=30)).isoformat()
 
         resp = await client.post(
             f"{SUPABASE_URL}/rest/v1/admins",
@@ -728,14 +776,16 @@ async def admin_register(request: Request):
                 "password_hash": pwd_hash,
                 "password_salt": salt,
                 "full_name": full_name,
-                "phone": phone
+                "phone": phone,
+                "session_token": token,
+                "session_expires_at": expires_at
             }
         )
     if resp.status_code not in (200, 201):
         raise HTTPException(500, "Не удалось создать аккаунт")
 
     created = resp.json()[0]
-    return {"admin_id": created["id"], "phone": phone, "full_name": full_name, "organization_id": organization_id}
+    return {"admin_id": created["id"], "phone": phone, "full_name": full_name, "organization_id": organization_id, "token": token}
 
 
 @app.post("/api/admin-login")
@@ -763,16 +813,30 @@ async def admin_login(request: Request):
     if check_hash != admin["password_hash"]:
         raise HTTPException(401, "Неверный номер или пароль")
 
+    token = generate_admin_token()
+    expires_at = (datetime.utcnow() + timedelta(days=30)).isoformat()
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/admins?id=eq.{admin['id']}",
+            headers=supabase_headers(),
+            json={"session_token": token, "session_expires_at": expires_at}
+        )
+
     return {
         "admin_id": admin["id"],
         "phone": admin["phone"],
         "full_name": admin.get("full_name", ""),
-        "organization_id": admin["organization_id"]
+        "organization_id": admin["organization_id"],
+        "token": token
     }
 
 
 @app.get("/api/admin/students")
-async def admin_students(organization_id: UUID):
+async def admin_students(organization_id: UUID, request: Request):
+    admin = await require_admin(request)
+    if str(admin["organization_id"]) != str(organization_id):
+        raise HTTPException(403, "Нет доступа к этой организации")
+
     async with httpx.AsyncClient(timeout=10) as client:
         students_resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/students?organization_id=eq.{organization_id}&select=id,first_name,last_name,phone,workplace&order=last_name",
@@ -818,8 +882,18 @@ async def admin_students(organization_id: UUID):
 
 
 @app.get("/api/admin/student-attempts")
-async def admin_student_attempts(student_id: UUID):
+async def admin_student_attempts(student_id: UUID, request: Request):
+    admin = await require_admin(request)
+
     async with httpx.AsyncClient(timeout=10) as client:
+        student_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/students?id=eq.{student_id}&select=organization_id",
+            headers=supabase_headers()
+        )
+        students = student_resp.json()
+        if not students or str(students[0]["organization_id"]) != str(admin["organization_id"]):
+            raise HTTPException(403, "Нет доступа к этому студенту")
+
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,finished_at,duration_seconds",
             headers=supabase_headers()
@@ -830,6 +904,7 @@ async def admin_student_attempts(student_id: UUID):
 
 # ── FEEDBACK (restricted submission, admin panel view) ───
 @app.post("/api/feedback")
+@limiter.limit("10/minute")
 async def submit_feedback(request: Request):
     data = await request.json()
     student_id = data.get("student_id")
@@ -857,7 +932,8 @@ async def submit_feedback(request: Request):
 
 
 @app.get("/api/feedback")
-async def list_feedback():
+async def list_feedback(request: Request):
+    await require_admin(request)
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
             f"{SUPABASE_URL}/rest/v1/feedback?order=created_at.desc&select=*",
@@ -868,6 +944,7 @@ async def list_feedback():
 
 @app.put("/api/feedback/{feedback_id}/status")
 async def update_feedback_status(feedback_id: UUID, request: Request):
+    await require_admin(request)
     data = await request.json()
     status = data.get("status", "new")
     async with httpx.AsyncClient(timeout=10) as client:
