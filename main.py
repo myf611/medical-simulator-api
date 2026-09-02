@@ -66,7 +66,6 @@ def health():
 # ── AI CHAT ─────────────────────────────────────────
 @app.post("/api/chat")
 async def chat_proxy(request: Request):
-    print("=== /api/chat HIT ===", flush=True)
     if not GROQ_KEY:
         return JSONResponse({"error": "API key not configured"}, status_code=500)
     body = await request.json()
@@ -524,7 +523,7 @@ Evaluate the student's work across all 5 stages according to the instructions.""
             GROQ_URL,
             headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "openai/gpt-oss-120b",
                 "messages": [
                     {"role": "system", "content": EVALUATOR_SYSTEMS[lang]},
                     {"role": "user", "content": prompt}
