@@ -65,7 +65,8 @@ def health():
 
 # ── AI CHAT ─────────────────────────────────────────
 @app.post("/api/chat")
-async def chat(request: Request):
+async def chat_proxy(request: Request):
+    print("=== /api/chat HIT ===", flush=True)
     if not GROQ_KEY:
         return JSONResponse({"error": "API key not configured"}, status_code=500)
     body = await request.json()
