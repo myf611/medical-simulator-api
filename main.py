@@ -384,55 +384,43 @@ async def workplace_search(q: str = "", limit: int = 8):
 
 # ── FINISH ATTEMPT: EVALUATE + SAVE (new 5-block exam flow) ─
 EVALUATOR_SYSTEMS = {
-"ru": """Ты — опытный клинический преподаватель медицинского вуза. Оцениваешь работу студента по разбору клинического кейса, который прошёл через 5 этапов: сбор анамнеза, физикальный осмотр, предварительный диагноз, назначение анализов, финальный диагноз и план лечения.
+"ru": """Ты — опытный клинический преподаватель медицинского вуза. Разбираешь работу студента по клиническому кейсу, который прошёл через 5 этапов: сбор анамнеза, физикальный осмотр, предварительный диагноз, назначение анализов, финальный диагноз и план лечения.
 
 ПРАВИЛЬНЫЙ ДИАГНОЗ И ОБОСНОВАНИЕ ты получишь в данных кейса ниже.
 
-Оцени работу студента и верни ТОЛЬКО валидный JSON без каких-либо пояснений до или после, строго в следующем формате:
+Разбери работу студента и верни ТОЛЬКО валидный JSON без каких-либо пояснений до или после, строго в следующем формате:
 
 {
-  "overall_grade": <число от 0 до 100>,
   "positive_points": [<массив строк — что сделано правильно, конкретно, со ссылкой на этап>],
-  "negative_points": [<массив строк — что пропущено или сделано неверно, конкретно>],
-  "block_grades": {
-    "anamnesis": <0-100>,
-    "exam": <0-100>,
-    "preliminary_diagnosis": <0-100>,
-    "labs": <0-100>,
-    "final": <0-100>
-  }
+  "negative_points": [<массив строк — что пропущено или сделано неверно, конкретно>]
 }
 
 Правила:
+- НЕ выставляй никаких баллов, процентов или числовых оценок. Только содержательный разбор.
 - positive_points и negative_points должны быть конкретными и объяснять ЗА ЧТО именно (не общими фразами).
 - Каждый пункт — отдельная строка, 1 предложение.
-- overall_grade — средневзвешенная оценка с учётом важности финального диагноза и плана лечения.
-- Если этап не пройден студентом (пустой) — соответствующий block_grade = 0 и упомяни это в negative_points.
+- Опирайся ТОЛЬКО на данные этого кейса. Не добавляй общие рекомендации, не относящиеся к нему.
+- НЕ оценивай орфографию и грамматику — только клиническое содержание.
+- Если этап не пройден студентом (пустой) — упомяни это в negative_points.
 - Отвечай на русском языке.""",
-"en": """You are an experienced clinical instructor at a medical school. You are evaluating a student's work on a clinical case that went through 5 stages: history taking, physical examination, preliminary diagnosis, ordering labs/investigations, final diagnosis and treatment plan.
+"en": """You are an experienced clinical instructor at a medical school. You are reviewing a student's work on a clinical case that went through 5 stages: history taking, physical examination, preliminary diagnosis, ordering labs/investigations, final diagnosis and treatment plan.
 
 You will receive the CORRECT DIAGNOSIS AND RATIONALE in the case data below.
 
-Evaluate the student's work and return ONLY valid JSON with no explanation before or after, strictly in the following format:
+Review the student's work and return ONLY valid JSON with no explanation before or after, strictly in the following format:
 
 {
-  "overall_grade": <number from 0 to 100>,
   "positive_points": [<array of strings — what was done correctly, specific, referencing the stage>],
-  "negative_points": [<array of strings — what was missed or done incorrectly, specific>],
-  "block_grades": {
-    "anamnesis": <0-100>,
-    "exam": <0-100>,
-    "preliminary_diagnosis": <0-100>,
-    "labs": <0-100>,
-    "final": <0-100>
-  }
+  "negative_points": [<array of strings — what was missed or done incorrectly, specific>]
 }
 
 Rules:
+- Do NOT assign any scores, percentages, or numeric grades. Only substantive review.
 - positive_points and negative_points must be specific and explain EXACTLY WHY (not generic phrases).
 - Each point is a separate string, 1 sentence.
-- overall_grade is a weighted average, giving importance to the final diagnosis and treatment plan.
-- If a stage was not completed by the student (empty) — the corresponding block_grade = 0 and mention this in negative_points.
+- Base your review ONLY on this case's data. Do not add general recommendations unrelated to it.
+- Do NOT evaluate spelling or grammar — only clinical content.
+- If a stage was not completed by the student (empty) — mention this in negative_points.
 - Respond entirely in English."""
 }
 
@@ -541,12 +529,10 @@ Evaluate the student's work across all 5 stages according to the instructions.""
         raw_eval = groq_data["choices"][0]["message"]["content"]
         evaluation = json.loads(raw_eval)
     except (KeyError, json.JSONDecodeError, IndexError):
-        fallback_msg = {"ru": "Не удалось автоматически оценить попытку.", "en": "Failed to automatically evaluate the attempt."}[lang]
+        fallback_msg = {"ru": "Не удалось автоматически разобрать попытку.", "en": "Failed to automatically review the attempt."}[lang]
         evaluation = {
-            "overall_grade": None,
             "positive_points": [],
-            "negative_points": [fallback_msg],
-            "block_grades": {}
+            "negative_points": [fallback_msg]
         }
 
     # Save to Supabase
@@ -568,7 +554,6 @@ Evaluate the student's work across all 5 stages according to the instructions.""
                 "organization_id": organization_id,
                 "case_title": case_title,
                 "finished_at": datetime.utcnow().isoformat(),
-                "grade": evaluation.get("overall_grade"),
                 "diagnosis": final.get("diagnosis"),
                 "treatment_plan": final.get("treatment_plan"),
                 "blocks": blocks,
@@ -644,32 +629,18 @@ async def update_student_profile(request: Request):
 async def student_history(student_id: UUID):
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,diagnosis,finished_at,duration_seconds",
+            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,diagnosis,finished_at,duration_seconds",
             headers=supabase_headers()
         )
         attempts = resp.json() if resp.status_code == 200 else []
 
-    def to_num(g):
-        if isinstance(g, (int, float)):
-            return g
-        if isinstance(g, str):
-            try:
-                return float(g)
-            except ValueError:
-                return None
-        return None
-
-    grades = [n for n in (to_num(a.get("grade")) for a in attempts) if n is not None]
     total_seconds = sum(a.get("duration_seconds") or 0 for a in attempts)
-
-    avg_grade = round(sum(grades) / len(grades)) if grades else None
     total_hours = round(total_seconds / 3600, 1) if total_seconds else 0
 
     return {
         "attempts": attempts,
         "stats": {
             "cases_completed": len(attempts),
-            "average_grade": avg_grade,
             "total_practice_hours": total_hours
         }
     }
@@ -845,37 +816,24 @@ async def admin_students(organization_id: UUID, request: Request):
         students = students_resp.json()
 
         attempts_resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/attempts?organization_id=eq.{organization_id}&select=student_id,grade",
+            f"{SUPABASE_URL}/rest/v1/attempts?organization_id=eq.{organization_id}&select=student_id",
             headers=supabase_headers()
         )
         attempts = attempts_resp.json()
 
-    stats_by_student = {}
+    counts_by_student = {}
     for a in attempts:
         sid = a.get("student_id")
-        if sid not in stats_by_student:
-            stats_by_student[sid] = {"count": 0, "grades": []}
-        stats_by_student[sid]["count"] += 1
-        g = a.get("grade")
-        if isinstance(g, (int, float)):
-            stats_by_student[sid]["grades"].append(g)
-        elif isinstance(g, str):
-            try:
-                stats_by_student[sid]["grades"].append(float(g))
-            except ValueError:
-                pass
+        counts_by_student[sid] = counts_by_student.get(sid, 0) + 1
 
     result = []
     for s in students:
-        stat = stats_by_student.get(s["id"], {"count": 0, "grades": []})
-        avg = round(sum(stat["grades"]) / len(stat["grades"])) if stat["grades"] else None
         result.append({
             "id": s["id"],
             "name": f"{s.get('last_name','')} {s.get('first_name','')}".strip(),
             "phone": s.get("phone"),
             "workplace": s.get("workplace"),
-            "cases_completed": stat["count"],
-            "average_grade": avg
+            "cases_completed": counts_by_student.get(s["id"], 0)
         })
 
     return result
@@ -895,7 +853,7 @@ async def admin_student_attempts(student_id: UUID, request: Request):
             raise HTTPException(403, "Нет доступа к этому студенту")
 
         resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,grade,finished_at,duration_seconds",
+            f"{SUPABASE_URL}/rest/v1/attempts?student_id=eq.{student_id}&order=finished_at.desc&select=id,case_title,finished_at,duration_seconds",
             headers=supabase_headers()
         )
     return resp.json() if resp.status_code == 200 else []
